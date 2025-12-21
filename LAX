@@ -80,7 +80,7 @@ local modalTrigger = Instance.new("TextButton", mainFrame)
 modalTrigger.Size = UDim2.new(0, 0, 0, 0); modalTrigger.Visible = true; modalTrigger.Modal = true
 
 local title = Instance.new("TextLabel", mainFrame)
-title.Size = UDim2.new(1, 0, 0, 50); title.Text = "💀 𝐋𝐚𝐱 𝐇𝐮𝐛 𝐯𝟏 💀"; title.TextColor3 = COL_WHITE
+title.Size = UDim2.new(1, 0, 0, 50); title.Text = "💀 Lax Hub V1 💀"; title.TextColor3 = COL_WHITE
 title.Font = Enum.Font.Michroma; title.TextSize = 15; title.BackgroundTransparency = 1
 
 local function createNoirBtn(text, desc, yPos)
