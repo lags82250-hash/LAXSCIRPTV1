@@ -1,0 +1,284 @@
+-- [[ 0. Xeno 최적화 및 로컬 캐싱 강화 ]]
+local players = game:GetService("Players")
+local localPlayer = players.LocalPlayer
+local runService = game:GetService("RunService")
+local userInput = game:GetService("UserInputService")
+local camera = workspace.CurrentCamera
+
+-- 자주 사용되는 내부 함수 로컬 캐싱 (속도 향상)
+local WorldToViewportPoint = camera.WorldToViewportPoint
+local Vector2new = Vector2.new
+local Vector3new = Vector3.new
+local CFnew = CFrame.new
+local mouse1press = mouse1press
+local mouse1release = mouse1release
+local mousemoverel = mousemoverel
+local math_abs = math.abs
+local tick = tick
+
+-- [[ 루프 제어 변수 최상위 선언 ]]
+local MainLoop = nil 
+local TargetLoop = nil
+
+-- [[ 1. Xeno 전용 Safe Drawing 엔진 ]]
+local function CreateSafeDrawing(class, props)
+    local obj = nil
+    pcall(function() obj = Drawing.new(class) end)
+    if not obj or type(obj) == "number" then
+        return { Visible = false, Remove = function() end, Destroy = function() end }
+    end
+    for k, v in pairs(props) do pcall(function() obj[k] = v end) end
+    return obj
+end
+
+local fovCircle = CreateSafeDrawing("Circle", {Thickness = 1, NumSides = 100, Radius = 150, Visible = false, Color = Color3.fromRGB(140, 0, 255)})
+local targetLine = CreateSafeDrawing("Line", {Thickness = 1.5, Visible = false, Color = Color3.fromRGB(255, 0, 0)})
+
+--------------------------------------------------
+-- 🎨 UI SYSTEM (무결성 유지)
+--------------------------------------------------
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/Library.lua"))()
+
+Library.BackgroundColor = Color3.fromRGB(10, 5, 20)
+Library.MainColor       = Color3.fromRGB(25, 8, 45)
+Library.AccentColor     = Color3.fromRGB(190, 40, 255)
+Library.SelectedTabColor= Color3.fromRGB(150, 30, 220)
+Library.OutlineColor    = Color3.fromRGB(60, 20, 100)
+
+local Window = Library:CreateWindow({
+    Title = "Lax Hub V1 (International Edition)",
+    Center = true,
+    AutoShow = true,
+    TabPadding = 8,
+    MenuFadeTime = 0.2
+})
+
+local MainTab = Window:AddTab("Main")
+
+-- [🎯 AIMBOT 섹션]
+local AimBox = MainTab:AddLeftTabbox("Aimbot")
+local AimTab = AimBox:AddTab("Aimbot") do
+    AimTab:AddToggle("Enabled", { Text = "Aimbot ON / OFF", Default = false, Tooltip = "Toggle the main Aimbot system on or off." }):AddKeyPicker("AimKey", { Default = "T", SyncToggleState = true, Mode = "Toggle", Text = "Aimbot Key" })
+    AimTab:AddDropdown("AimMethod", { Text = "Aim Method", Default = "Camera", Values = { "Camera", "Mouse" }, Tooltip = "Choose between Camera manipulation or Mouse movement for aiming." })
+    AimTab:AddToggle("TeamCheck", { Text = "Team Check", Default = true, Tooltip = "Prevents the script from targeting teammates." })
+    AimTab:AddToggle("WallCheck", { Text = "Wall Check", Default = true, Tooltip = "Only targets enemies who are visible and not behind walls." })
+    AimTab:AddToggle("FFCheck", { Text = "ForceField Check", Default = true, Tooltip = "Ignore players with active spawn protection (ForceField)." })
+    AimTab:AddToggle("StrongLock", { Text = "Absolute Sticky Lock", Default = false, Tooltip = "Increases aim stickiness to prevent losing the target." })
+    AimTab:AddSlider("Smoothing", { Text = "Aim Smoothness", Default = 2, Min = 1, Max = 10, Rounding = 1, Tooltip = "Controls how smoothly the aim follows the target. Higher = Smoother." })
+    AimTab:AddSlider("AimMaxDistance", { Text = "Aimbot Scan Distance", Default = 1000, Min = 10, Max = 5000, Rounding = 0, Tooltip = "Maximum distance in studs to detect targets for Aimbot." })
+    AimTab:AddToggle("ADSOnly", { Text = "ADS Only", Default = false, Tooltip = "Aimbot only activates while you are aiming down sights (Right Click)." })
+    AimTab:AddToggle("PredictionEnabled", { Text = "Prediction (Lead Aim)", Default = false, Tooltip = "Calculates target movement to lead shots ahead of them." })
+    AimTab:AddSlider("PredictionValue", { Text = "Prediction Intensity", Default = 5, Min = 1, Max = 10, Rounding = 1, Tooltip = "Adjust how far ahead the lead aim should predict." })
+end
+
+-- [🔫 TRIGGERBOT 섹션]
+local TriggerBox = MainTab:AddLeftTabbox("TriggerBot")
+local TriggerTab = TriggerBox:AddTab("TriggerBot") do
+    TriggerTab:AddToggle("GeneralTriggerBot", { Text = "TriggerBot ON / OFF", Default = false, Tooltip = "Automatically fires when an enemy is in range/FOV." }):AddKeyPicker("TriggerKey", { Default = "V", SyncToggleState = true, Mode = "Toggle", Text = "Trigger Key" })
+    TriggerTab:AddDropdown("TriggerType", { Text = "Trigger Type", Default = "FOV Check", Values = { "360", "FOV Check" }, Tooltip = "360: Fires at anyone in world range. FOV Check: Only fires inside the circle." })
+    TriggerTab:AddSlider("ScanRange360", { Text = "360 Scan Range", Default = 500, Min = 100, Max = 2000, Rounding = 0, Tooltip = "The maximum distance in studs for 360-degree detection." })
+    TriggerTab:AddSlider("FireRate", { Text = "Fire Delay", Default = 0.05, Min = 0.01, Max = 2, Rounding = 2, Tooltip = "The delay between each shot fired by TriggerBot." })
+end
+
+-- [⚙ SETTINGS 섹션]
+local SettingsBox = MainTab:AddRightTabbox("Settings")
+local SettingsTab = SettingsBox:AddTab("Settings") do
+    SettingsTab:AddToggle("ShowFOV", { Text = "Show FOV", Default = true, Tooltip = "Renders a visual circle representing your aim field-of-view." })
+    SettingsTab:AddSlider("FOVSize", { Text = "FOV Size", Default = 150, Min = 10, Max = 800, Rounding = 0, Tooltip = "The radius of the Aimbot's activation area." })
+    SettingsTab:AddToggle("ShowTracer", { Text = "Target Tracer ESP", Default = true, Tooltip = "Draws a line from your screen center to the current target." })
+    SettingsTab:AddLabel("FOV Color"):AddColorPicker("FOVColor", { Default = Color3.fromRGB(140, 0, 255) })
+    SettingsTab:AddLabel("Tracer Color"):AddColorPicker("TracerColor", { Default = Color3.fromRGB(255, 0, 0) })
+    
+    SettingsTab:AddButton("CRUSH GUI", function() 
+        if MainLoop then MainLoop:Disconnect(); MainLoop = nil end 
+        if TargetLoop then TargetLoop:Disconnect(); TargetLoop = nil end
+        mouse1release()
+        pcall(function() fovCircle:Remove() end)
+        pcall(function() targetLine:Remove() end)
+        Library:Unload() 
+    end)
+end
+
+--------------------------------------------------
+-- 🚀 OPTIMIZED CORE LOGIC
+--------------------------------------------------
+local lastFireTime = 0
+local lockedTarget = nil
+local bestTarget = nil
+local isCurrentlyFiring = false
+
+-- 레이캐스트 최적화 (가시성 체크)
+local function isVisible(part, wallCheckEnabled)
+    if not wallCheckEnabled then return true end
+    local char = localPlayer.Character
+    if not char then return false end
+    
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = {char, camera}
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local result = workspace:Raycast(camera.CFrame.Position, (part.Position - camera.CFrame.Position), params)
+    return result == nil or result.Instance:IsDescendantOf(part.Parent)
+end
+
+-- [[ 최적화 a: 타겟 탐색 루프 분리 (Heartbeat 활용으로 FPS 방어) ]]
+TargetLoop = runService.Heartbeat:Connect(function()
+    local myChar = localPlayer.Character
+    if not myChar or not myChar:FindFirstChild("Head") then 
+        bestTarget = nil
+        return 
+    end
+
+    local isTriggerKeyDown = Toggles.GeneralTriggerBot.Value
+    local isAimKeyDown = Toggles.Enabled.Value
+    if not (isTriggerKeyDown or isAimKeyDown) then 
+        bestTarget = nil 
+        return 
+    end
+
+    local mouseLoc = userInput:GetMouseLocation()
+    local tempBestTarget = nil
+    local shortestDist = 9e9
+    
+    -- Sticky Lock 처리
+    if Toggles.StrongLock.Value and lockedTarget then
+        local char = lockedTarget.Parent
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health > 0 then
+            tempBestTarget = lockedTarget
+        end
+    end
+
+    if not tempBestTarget then
+        local currentFovRadius = Options.FOVSize.Value
+        local maxAimDist = Options.AimMaxDistance.Value
+        local is360Mode = (isTriggerKeyDown and Options.TriggerType.Value == "360")
+        local scanRange360 = Options.ScanRange360.Value
+
+        for _, player in ipairs(players:GetPlayers()) do
+            if player == localPlayer then continue end
+            if Toggles.TeamCheck.Value and player.Team == localPlayer.Team then continue end
+
+            local char = player.Character
+            local head = char and char:FindFirstChild("Head")
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+            if head and hum and hum.Health > 0 then
+                -- FF체크를 월드 거리 체크보다 먼저 수행하여 연산 절약
+                if Toggles.FFCheck.Value and char:FindFirstChildOfClass("ForceField") then continue end
+                
+                local worldDist = (myChar.Head.Position - head.Position).Magnitude
+                
+                if is360Mode then
+                    if worldDist <= scanRange360 and worldDist < shortestDist then
+                        if isVisible(head, Toggles.WallCheck.Value) then
+                            tempBestTarget = head
+                            shortestDist = worldDist
+                        end
+                    end
+                else
+                    if worldDist <= maxAimDist then
+                        local screenPos, onScreen = WorldToViewportPoint(camera, head.Position)
+                        if onScreen then
+                            local distFromMouse = (Vector2new(screenPos.X, screenPos.Y) - mouseLoc).Magnitude
+                            if distFromMouse <= currentFovRadius and distFromMouse < shortestDist then
+                                if isVisible(head, Toggles.WallCheck.Value) then
+                                    tempBestTarget = head
+                                    shortestDist = distFromMouse
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    bestTarget = tempBestTarget
+end)
+
+-- [[ 메인 실행 루프 (RenderStepped: 조준 반응성 유지) ]]
+MainLoop = runService.RenderStepped:Connect(function()
+    local mouseLoc = userInput:GetMouseLocation()
+    local isRightMouseDown = userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    local isTriggerKeyDown = Toggles.GeneralTriggerBot.Value
+    local isAimKeyDown = Toggles.Enabled.Value and (not Toggles.ADSOnly.Value or isRightMouseDown)
+    
+    -- FOV Circle 업데이트 (최소 연산)
+    local is360Mode = (isTriggerKeyDown and Options.TriggerType.Value == "360")
+    local shouldVisible = Toggles.ShowFOV.Value and not is360Mode
+    fovCircle.Visible = shouldVisible
+    if shouldVisible then
+        fovCircle.Radius = Options.FOVSize.Value
+        fovCircle.Position = mouseLoc
+        fovCircle.Color = Options.FOVColor.Value
+    end
+
+    -- 타겟 락 상태 갱신
+    lockedTarget = (isAimKeyDown or isTriggerKeyDown) and bestTarget or nil
+
+    -- 트레이서 & 조준/사격 실행
+    if lockedTarget then
+        local target = lockedTarget
+        local finalPos = target.Position
+        
+        -- 트레이서 업데이트
+        if Toggles.ShowTracer.Value then
+            local tPos, tOnScreen = WorldToViewportPoint(camera, finalPos)
+            if tOnScreen then
+                targetLine.Visible = true
+                targetLine.From = Vector2new(camera.ViewportSize.X/2, camera.ViewportSize.Y/2)
+                targetLine.To = Vector2new(tPos.X, tPos.Y)
+                targetLine.Color = Options.TracerColor.Value
+            else targetLine.Visible = false end
+        else targetLine.Visible = false end
+
+        -- 예측 사격
+        if Toggles.PredictionEnabled.Value then
+            local root = target.Parent:FindFirstChild("HumanoidRootPart")
+            if root then
+                local distance = (camera.CFrame.Position - finalPos).Magnitude
+                finalPos = finalPos + (root.Velocity * (distance / 500) * (Options.PredictionValue.Value * 0.2))
+            end
+        end
+
+        -- 조준(Aimbot)
+        if isAimKeyDown or isTriggerKeyDown then
+            if Options.AimMethod.Value == "Camera" then
+                local targetCF = CFnew(camera.CFrame.Position, finalPos)
+                if Toggles.StrongLock.Value then camera.CFrame = targetCF
+                else camera.CFrame = camera.CFrame:Lerp(targetCF, 1 / (Options.Smoothing.Value * 2.5)) end
+            else
+                local screenPos, onScreen = WorldToViewportPoint(camera, finalPos)
+                if onScreen then
+                    local deltaX = (screenPos.X - mouseLoc.X)
+                    local deltaY = (screenPos.Y - mouseLoc.Y)
+                    local smooth = Toggles.StrongLock.Value and 1 or (Options.Smoothing.Value * 1.5)
+                    mousemoverel(deltaX / smooth, deltaY / smooth)
+                end
+            end
+        end
+
+        -- 사격(TriggerBot)
+        if isTriggerKeyDown then
+            local canFire = true
+            if Options.TriggerType.Value == "FOV Check" then
+                local screenPos, onScreen = WorldToViewportPoint(camera, target.Position)
+                if not onScreen or (Vector2new(screenPos.X, screenPos.Y) - mouseLoc).Magnitude > Options.FOVSize.Value then
+                    canFire = false
+                end
+            end
+
+            if canFire then
+                if tick() - lastFireTime >= Options.FireRate.Value then
+                    lastFireTime = tick()
+                    mouse1release(); mouse1press()
+                    isCurrentlyFiring = true
+                end
+            elseif isCurrentlyFiring then mouse1release(); isCurrentlyFiring = false end
+        elseif isCurrentlyFiring then mouse1release(); isCurrentlyFiring = false end
+    else
+        targetLine.Visible = false
+        if isCurrentlyFiring then mouse1release(); isCurrentlyFiring = false end
+    end
+end)
+
+Library:Notify("Lax Hub V1: Optimized Engine Active (FPS Protected).")
