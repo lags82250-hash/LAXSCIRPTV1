@@ -22,7 +22,9 @@ local SearchLoop = nil -- 최적화를 위한 탐색 전용 루프 추가
 -- [[ 1. Xeno 전용 Safe Drawing 엔진 ]]
 local function CreateSafeDrawing(class, props)
     local obj = nil
-    pcall(function() obj = Drawing.new(class) end)
+    pcall(function() 
+        obj = Drawing.new(class) 
+    end)
     if not obj or type(obj) == "number" then
         return { Visible = false, Remove = function() end, Destroy = function() end }
     end
@@ -30,11 +32,25 @@ local function CreateSafeDrawing(class, props)
     return obj
 end
 
+-- [기존 드로잉 객체]
 local fovCircle = CreateSafeDrawing("Circle", {Thickness = 1, NumSides = 100, Radius = 150, Visible = false, Color = Color3.fromRGB(140, 0, 255)})
 local targetLine = CreateSafeDrawing("Line", {Thickness = 1.5, Visible = false, Color = Color3.fromRGB(255, 0, 0)})
 
+-- [추가된 ESP 객체: 단일 타겟용 재사용 풀 (Skeleton Box & HeadDot)]
+local TargetESP_Box = {
+    TL = CreateSafeDrawing("Line", {Thickness = 1.5, Visible = false}), 
+    TR = CreateSafeDrawing("Line", {Thickness = 1.5, Visible = false}),
+    BL = CreateSafeDrawing("Line", {Thickness = 1.5, Visible = false}), 
+    BR = CreateSafeDrawing("Line", {Thickness = 1.5, Visible = false}),
+    L = CreateSafeDrawing("Line", {Thickness = 1.5, Visible = false}), 
+    R = CreateSafeDrawing("Line", {Thickness = 1.5, Visible = false}),
+    T = CreateSafeDrawing("Line", {Thickness = 1.5, Visible = false}), 
+    B = CreateSafeDrawing("Line", {Thickness = 1.5, Visible = false})
+}
+local TargetESP_HeadDot = CreateSafeDrawing("Circle", {Thickness = 1, Filled = false, Visible = false})
+
 --------------------------------------------------
--- 🎨 UI SYSTEM (무결성 보존)
+-- 🎨 UI SYSTEM (무결성 보존 + 드롭다운 변경)
 --------------------------------------------------
 local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/Library.lua"))()
 
@@ -45,7 +61,7 @@ Library.SelectedTabColor= Color3.fromRGB(150, 30, 220)
 Library.OutlineColor    = Color3.fromRGB(60, 20, 100)
 
 local Window = Library:CreateWindow({
-    Title = "Lax Hub V1",
+    Title = "Lax Hub V1 - Gemini Mod",
     Center = true,
     AutoShow = true,
     TabPadding = 8,
@@ -74,6 +90,7 @@ end
 local TriggerBox = MainTab:AddLeftTabbox("TriggerBot")
 local TriggerTab = TriggerBox:AddTab("TriggerBot") do
     TriggerTab:AddToggle("GeneralTriggerBot", { Text = "TriggerBot ON / OFF", Default = false, Tooltip = "Automatically fires when an enemy is in range/FOV." }):AddKeyPicker("TriggerKey", { Default = "V", SyncToggleState = true, Mode = "Toggle", Text = "Trigger Key" })
+    -- [주의] Dropdown 값은 "360 check" 입니다. 코드에서 이 문자열을 정확히 비교해야 합니다.
     TriggerTab:AddDropdown("TriggerType", { Text = "Trigger Type", Default = "FOV Check", Values = { "360 check", "FOV Check" }, Tooltip = "360: Fires at anyone in world range. FOV Check: Only fires inside the circle." })
     TriggerTab:AddSlider("ScanRange360", { Text = "360 Scan Range", Default = 500, Min = 100, Max = 2000, Rounding = 0, Tooltip = "The maximum distance in studs for 360-degree detection." })
     TriggerTab:AddSlider("FireRate", { Text = "Fire Delay", Default = 0.05, Min = 0.01, Max = 2, Rounding = 2, Tooltip = "The delay between each shot fired by TriggerBot." })
@@ -84,9 +101,17 @@ local SettingsBox = MainTab:AddRightTabbox("Settings")
 local SettingsTab = SettingsBox:AddTab("Settings") do
     SettingsTab:AddToggle("ShowFOV", { Text = "Show FOV", Default = true, Tooltip = "Renders a visual circle representing your aim field-of-view." })
     SettingsTab:AddSlider("FOVSize", { Text = "FOV Size", Default = 150, Min = 10, Max = 800, Rounding = 0, Tooltip = "The radius of the Aimbot's activation area." })
-    SettingsTab:AddToggle("ShowTracer", { Text = "Target Tracer ESP", Default = true, Tooltip = "Draws a line from your screen center to the current target." })
+    
+    -- [승인된 변경: 드롭다운으로 교체]
+    SettingsTab:AddDropdown("VisualType", { 
+        Text = "Target Visual Type", 
+        Default = "Tracer", 
+        Values = { "None", "Tracer", "corner Box/head dot" }, 
+        Tooltip = "Choose how the detected target is visualized.\nTracer: Line to target.\nSkeleton Box: Corner Box & Head Dot." 
+    })
+
     SettingsTab:AddLabel("FOV Color"):AddColorPicker("FOVColor", { Default = Color3.fromRGB(140, 0, 255) })
-    SettingsTab:AddLabel("Tracer Color"):AddColorPicker("TracerColor", { Default = Color3.fromRGB(255, 0, 0) })
+    SettingsTab:AddLabel("Visual Color"):AddColorPicker("TracerColor", { Default = Color3.fromRGB(255, 0, 0) }) -- Tracer & Box 겸용
     
     SettingsTab:AddButton("CRUSH GUI", function() 
         if MainLoop then MainLoop:Disconnect(); MainLoop = nil end 
@@ -94,6 +119,11 @@ local SettingsTab = SettingsBox:AddTab("Settings") do
         mouse1release()
         pcall(function() fovCircle:Remove() end)
         pcall(function() targetLine:Remove() end)
+        -- [추가된 객체 정리]
+        pcall(function() 
+            for _, v in pairs(TargetESP_Box) do v:Remove() end 
+            TargetESP_HeadDot:Remove()
+        end)
         Library:Unload() 
     end)
 end
@@ -136,7 +166,8 @@ SearchLoop = runService.Heartbeat:Connect(function()
     -- 전역 설정 캐싱
     local fovRadius = Options.FOVSize.Value
     local maxAimDist = Options.AimMaxDistance.Value
-    local is360Mode = (isTriggerOn and Options.TriggerType.Value == "360")
+    -- [수정됨: 문자열 불일치 오류 해결. "360 check"와 정확히 매칭]
+    local is360Mode = (isTriggerOn and Options.TriggerType.Value == "360 check")
     local scanRange360 = Options.ScanRange360.Value
 
     -- Sticky Lock 우선 순위
@@ -199,7 +230,8 @@ MainLoop = runService.RenderStepped:Connect(function()
 
     -- [FOV 렌더링 최적화]
     pcall(function()
-        local is360Mode = (isTriggerKeyDown and Options.TriggerType.Value == "360")
+        -- [수정됨: 문자열 매칭 수정]
+        local is360Mode = (isTriggerKeyDown and Options.TriggerType.Value == "360 check")
         local shouldVisible = Toggles.ShowFOV.Value and not is360Mode
         fovCircle.Visible = shouldVisible
         if shouldVisible then
@@ -210,17 +242,71 @@ MainLoop = runService.RenderStepped:Connect(function()
         end
     end)
 
-    -- [타겟 트레이서 ESP (무결성 보존)]
+    -- [타겟 비주얼 시스템 (통합)]
+    -- 요청하신 대로 "적이 감지되면 미리 보여주는 기능"을 위해 currentBestTarget을 사용합니다.
     pcall(function()
-        if Toggles.ShowTracer.Value and currentBestTarget then
-            local tPos, tOnScreen = WorldToViewportPoint(camera, currentBestTarget.Position)
-            if tOnScreen then
-                targetLine.Visible = true
-                targetLine.From = Vector2new(camera.ViewportSize.X/2, camera.ViewportSize.Y/2)
-                targetLine.To = Vector2new(tPos.X, tPos.Y)
-                targetLine.Color = Options.TracerColor.Value
-            else targetLine.Visible = false end
-        else targetLine.Visible = false end
+        local visualType = Options.VisualType.Value
+        local visualColor = Options.TracerColor.Value
+
+        -- 모든 비주얼 초기화 (잔상 제거)
+        targetLine.Visible = false
+        for _, line in pairs(TargetESP_Box) do line.Visible = false end
+        TargetESP_HeadDot.Visible = false
+
+        if currentBestTarget and visualType ~= "None" then
+            local char = currentBestTarget.Parent
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            
+            if char and hrp then
+                local tPos, tOnScreen = WorldToViewportPoint(camera, currentBestTarget.Position)
+
+                if tOnScreen then
+                    if visualType == "Tracer" then
+                        -- [기존 Tracer]
+                        targetLine.Visible = true
+                        targetLine.From = Vector2new(camera.ViewportSize.X/2, camera.ViewportSize.Y/2)
+                        targetLine.To = Vector2new(tPos.X, tPos.Y)
+                        targetLine.Color = visualColor
+                    
+                    elseif visualType == "Skeleton Box" then
+                        -- [추가된 Skeleton Box ESP - Source 1 로직 이식]
+                        local size = char:GetExtentsSize()
+                        local topPos = WorldToViewportPoint(camera, (hrp.CFrame * CFnew(0, size.Y/2 + 0.5, 0)).Position)
+                        local bottomPos = WorldToViewportPoint(camera, (hrp.CFrame * CFnew(0, -size.Y/2 - 0.5, 0)).Position)
+                        
+                        local screenSize = math.abs(bottomPos.Y - topPos.Y)
+                        local boxWidth = screenSize * 0.65
+                        local boxX = topPos.X - boxWidth/2
+                        local cornerLen = boxWidth * 0.25
+
+                        -- 박스 라인 좌표 계산
+                        local b = TargetESP_Box
+                        b.TL.From = Vector2new(boxX, topPos.Y); b.TL.To = Vector2new(boxX + cornerLen, topPos.Y)
+                        b.TR.From = Vector2new(boxX + boxWidth, topPos.Y); b.TR.To = Vector2new(boxX + boxWidth - cornerLen, topPos.Y)
+                        b.BL.From = Vector2new(boxX, topPos.Y + screenSize); b.BL.To = Vector2new(boxX + cornerLen, topPos.Y + screenSize)
+                        b.BR.From = Vector2new(boxX + boxWidth, topPos.Y + screenSize); b.BR.To = Vector2new(boxX + boxWidth - cornerLen, topPos.Y + screenSize)
+                        
+                        b.L.From = Vector2new(boxX, topPos.Y); b.L.To = Vector2new(boxX, topPos.Y + cornerLen)
+                        b.R.From = Vector2new(boxX + boxWidth, topPos.Y); b.R.To = Vector2new(boxX + boxWidth, topPos.Y + cornerLen)
+                        b.T.From = Vector2new(boxX, topPos.Y + screenSize); b.T.To = Vector2new(boxX, topPos.Y + screenSize - cornerLen)
+                        b.B.From = Vector2new(boxX + boxWidth, topPos.Y + screenSize); b.B.To = Vector2new(boxX + boxWidth, topPos.Y + screenSize - cornerLen)
+
+                        for _, line in pairs(b) do 
+                            line.Visible = true 
+                            line.Color = visualColor
+                            line.Transparency = 1
+                        end
+
+                        -- 헤드 돗 계산
+                        local distance = (camera.CFrame.Position - currentBestTarget.Position).Magnitude
+                        TargetESP_HeadDot.Position = Vector2new(tPos.X, tPos.Y)
+                        TargetESP_HeadDot.Radius = math.clamp((1 / distance) * 633, 1.2, 92)
+                        TargetESP_HeadDot.Color = Color3.fromRGB(255, 255, 255) -- 헤드 돗은 흰색 고정
+                        TargetESP_HeadDot.Visible = true
+                    end
+                end
+            end
+        end
     end)
 
     -- [핵심 실행 로직]
@@ -253,25 +339,34 @@ MainLoop = runService.RenderStepped:Connect(function()
             end
         end
 
-        -- 사격 (TriggerBot)
+        -- 사격 (TriggerBot) [오류 수정됨]
         if isTriggerKeyDown then
-            local canFire = true
-            if Options.TriggerType.Value == "FOV Check" then
-                local screenPos, onScreen = WorldToViewportPoint(camera, lockedTarget.Position)
-                if not onScreen or (Vector2new(screenPos.X, screenPos.Y) - mouseLoc).Magnitude > Options.FOVSize.Value then
-                    canFire = false
+            -- [안전장치] 타겟이 없으면 즉시 사격 중단 (오류 방지)
+            if not lockedTarget then
+                 if isCurrentlyFiring then mouse1release(); isCurrentlyFiring = false end
+            else
+                local canFire = true
+                -- [수정] "360 check"와 정확히 매칭 (기존 "360"으로 되어있던 버그 수정)
+                if Options.TriggerType.Value == "FOV Check" then
+                    local screenPos, onScreen = WorldToViewportPoint(camera, lockedTarget.Position)
+                    if not onScreen or (Vector2new(screenPos.X, screenPos.Y) - mouseLoc).Magnitude > Options.FOVSize.Value then
+                        canFire = false
+                    end
+                end
+
+                if canFire and (tick() - lastFireTime >= Options.FireRate.Value) then
+                    lastFireTime = tick()
+                    mouse1release()
+                    mouse1press()
+                    isCurrentlyFiring = true
+                elseif not canFire and isCurrentlyFiring then
+                    mouse1release()
+                    isCurrentlyFiring = false
                 end
             end
-
-            if canFire and (tick() - lastFireTime >= Options.FireRate.Value) then
-                lastFireTime = tick()
-                mouse1release(); mouse1press()
-                isCurrentlyFiring = true
-            elseif not canFire and isCurrentlyFiring then
-                mouse1release(); isCurrentlyFiring = false
-            end
         elseif isCurrentlyFiring then
-            mouse1release(); isCurrentlyFiring = false
+            mouse1release()
+            isCurrentlyFiring = false
         end
     else
         if isCurrentlyFiring then mouse1release(); isCurrentlyFiring = false end
